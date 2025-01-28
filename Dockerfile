@@ -1,5 +1,5 @@
 FROM nvcr.io/nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
-LABEL maintainer="Learning@home"
+LABEL maintainer="ReEnvision AI"
 LABEL repository="hivemind"
 
 WORKDIR /home
