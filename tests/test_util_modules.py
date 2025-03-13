@@ -182,7 +182,7 @@ async def test_await_mpfuture():
     p = mp.Process(target=wait_and_cancel)
     p.start()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(concurrent.futures.CancelledError):
         # note: it is intended that MPFuture raises Cancel
         await asyncio.gather(f1, f2)
 
@@ -216,13 +216,13 @@ def test_mpfuture_bidirectional():
         future_from_fork = hivemind.MPFuture()
         future_from_main.set_result(("abc", future_from_fork))
 
-        if future_from_fork.result() == ["we", "need", "to", "go", "deeper"]:
+        if future_from_fork.result(timeout=5) == ["we", "need", "to", "go", "deeper"]:
             evt.set()
 
     p = mp.Process(target=_future_creator)
     p.start()
 
-    out = future_from_main.result()
+    out = future_from_main.result(timeout=5)
     assert isinstance(out[1], hivemind.MPFuture)
     out[1].set_result(["we", "need", "to", "go", "deeper"])
 

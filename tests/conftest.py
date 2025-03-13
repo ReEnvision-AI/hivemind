@@ -47,4 +47,3 @@ def cleanup_children():
         for child in alive:
             child.kill()
 
-    MPFuture.reset_backend()
