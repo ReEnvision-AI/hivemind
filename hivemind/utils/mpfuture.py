@@ -1,87 +1,108 @@
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures._base as base
 import multiprocessing as mp
 import os
 import threading
 import uuid
-from concurrent.futures import Future, InvalidStateError, CancelledError
+from concurrent.futures import InvalidStateError
 from contextlib import nullcontext
 from enum import Enum, auto
-from multiprocessing import shared_memory
-from typing import Any, Callable, Generic, Optional, TypeVar
+from multiprocessing.reduction import ForkingPickler
+from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 from weakref import ref
-import asyncio
 
-# Type variable for generic result type
+import torch  # used for py3.7-compatible shared memory
+
+from hivemind.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+torch.multiprocessing.set_sharing_strategy(os.environ.get("HIVEMIND_MEMORY_SHARING_STRATEGY", "file_system"))
+
+# flavour types
 ResultType = TypeVar("ResultType")
+PID, UID, State, PipeEnd = int, int, str, mp.connection.Connection
+ALL_STATES = base.PENDING, base.RUNNING, base.FINISHED, base.CANCELLED, base.CANCELLED_AND_NOTIFIED
+TERMINAL_STATES = {base.FINISHED, base.CANCELLED, base.CANCELLED_AND_NOTIFIED}
 
-# Define all possible states for the Future
-ALL_STATES = ('PENDING', 'RUNNING', 'FINISHED', 'CANCELLED', 'CANCELLED_AND_NOTIFIED')
-TERMINAL_STATES = {'FINISHED', 'CANCELLED', 'CANCELLED_AND_NOTIFIED'}
 
-# Enum for update types sent between processes
+class SharedBytes:
+    """
+    A process-wide object that allocates large chunks of shared memory and partitions it into individual bytes.
+
+    Note: this process is only responsible for bulk allocation, it does not manage/free unused bytes.
+    The chunks are deallocated by the garbage collector,
+    when it detects that all processes no longer use any bytes from this chunk.
+    """
+
+    _lock = mp.Lock()
+    _pid: Optional[PID] = None
+    _buffer: Optional[torch.Tensor] = None
+    _index: int = 0
+
+    @classmethod
+    def next(cls) -> torch.Tensor:
+        """Create another shared byte value, represented as a scalar uint8 tensor"""
+        with cls._lock:
+            if cls._pid != os.getpid() or cls._buffer is None or cls._index >= len(cls._buffer):
+                buffer_size = int(os.environ.get("HIVEMIND_SHM_BUFFER_SIZE", 16))
+                cls._pid = os.getpid()
+                cls._buffer = torch.empty([buffer_size], dtype=torch.uint8).share_memory_()
+                cls._index = 0
+
+            cls._index += 1
+            return cls._buffer[cls._index - 1]
+
+
 class UpdateType(Enum):
     RESULT = auto()
     EXCEPTION = auto()
     CANCEL = auto()
 
-class MPFuture(Future, Generic[ResultType]):
+
+class MPFuture(base.Future, Generic[ResultType]):
     """
-    A Future implementation that supports cross-process result and exception handling
-    using a shared memory pool for state management and a managed queue dictionary for updates.
+    A version of concurrent.futures.Future / asyncio.Future that can be fulfilled from a separate process.
+    Any process can access future status and set the result / exception and check for state.
+    However, only the original process (i.e. the process that created the future) can await the result or exception.
+
+    :param use_lock: if True, operations with MPFuture use a global lock to prevent concurrent writes to the same pipe;
+      If set to False, writing to this future ignores global lock, slightly improving performance, but making user
+      responsible for avoiding concurrent set_result / set_exception calls to futures with the same process of origin.
+
+    :note: This is an internal primitive that is not guaranteed to work outside of hivemind applications.
+     More specifically, there are two known limitations:
+       - MPFuture works between processes created through inheritance (e.g. fork), *not* for independent processes
+       - MPFuture is deterministic if only one process can call set_result/set_exception/set_running_or_notify_cancel
+         and only the origin process can call result/exception/cancel.
     """
 
-    # Class-level attributes for managing shared resources
-    _manager = None  # Multiprocessing Manager instance
-    _queue_dict = None  # Shared dictionary mapping PIDs to queues
-    _shared_memory_pool = None  # Shared memory segment for all futures' states
-    _next_offset = None  # Managed integer for next available offset
-    _offset_lock = None  # Managed lock for offset allocation
-    _initialization_lock = mp.Lock()  # Lock for initializing backend
-    _update_lock = mp.Lock()  # Lock for sending updates
-    _active_futures = None  # Dictionary of active futures in the origin process
-    _active_pid = None  # PID of the current process for active futures
-    _pipe_waiter_thread = None  # Background thread for processing updates
+    _initialization_lock = mp.Lock()  # global lock that prevents simultaneous initialization of two processes
+    _update_lock = mp.Lock()  # global lock that prevents simultaneous writing to the same pipe
+    _global_sender_pipe: Optional[PipeEnd] = None  # a pipe that is used to send results/exceptions to this process
+    _pipe_waiter_thread: Optional[threading.Thread] = None  # process-specific thread that receives results/exceptions
+    _active_futures: Optional[Dict[UID, ref[MPFuture]]] = None  # non-done futures originated from this process
+    _active_pid: Optional[PID] = None  # pid of currently active process; used to handle forks natively
 
     def __init__(self, *, use_lock: bool = True):
-        """
-        Initialize an MPFuture instance.
-
-        Args:
-            use_lock (bool): Whether to use a lock when sending updates (default: True).
-        """
-        # Ensure the backend is initialized
         self._maybe_initialize_mpfuture_backend()
 
-        # Store the PID of the process that created this future
-        self._origin_pid = os.getpid()
+        self._origin_pid, self._uid = os.getpid(), uuid.uuid4().int
+        self._shared_state_code = SharedBytes.next()
+        self._state_cache: Dict[State, State] = {}
+        # mapping from global to cached local future used that makes updates immediately
+        # available on setter side; dictionary-based cache works because future can visit any state at most once
 
-        # Generate a unique identifier for this future
-        self._uid = uuid.uuid4().int
-
-        # Allocate an offset from the shared memory pool
-        with MPFuture._offset_lock:
-            offset = MPFuture._next_offset.value
-            MPFuture._next_offset.value += 1
-            if offset >= MPFuture._shared_memory_pool.size:
-                raise RuntimeError("Shared memory pool exhausted")
-        self._offset = offset
-        self._shared_state_code = MPFuture._shared_memory_pool
-
-        # Initialize the state to PENDING in the shared memory
-        self._shared_state_code.buf[self._offset] = ALL_STATES.index('PENDING')
-
-        # Cache for state strings to avoid repeated creation
-        self._state_cache = {}
-
-        # Initialize the base Future class
-        super().__init__()
-
-        # Whether to use a lock for updates
+        base.Future.__init__(self)  # parent init is deferred because it uses self._shared_state_code
+        self._state, self._result, self._exception = base.PENDING, None, None
         self._use_lock = use_lock
 
-        # Register this future in the active futures dictionary
+        assert self._uid not in MPFuture._active_futures
         MPFuture._active_futures[self._uid] = ref(self)
+        self._sender_pipe = MPFuture._global_sender_pipe
 
-        # Set up asyncio event for async support, if an event loop is available
         try:
             self._loop = asyncio.get_event_loop()
             self._aio_event = asyncio.Event()
@@ -89,215 +110,219 @@ class MPFuture(Future, Generic[ResultType]):
             self._loop, self._aio_event = None, None
 
     @property
-    def _state(self) -> str:
-        """Get the current state of the future from the shared memory pool."""
-        state_index = self._shared_state_code.buf[self._offset]
-        shared_state = ALL_STATES[state_index]
+    def _state(self) -> State:
+        shared_state = ALL_STATES[self._shared_state_code.item()]
         return self._state_cache.get(shared_state, shared_state)
 
     @_state.setter
-    def _state(self, new_state: str):
-        """Set the state of the future in the shared memory pool."""
-        state_index = ALL_STATES.index(new_state)
-        self._shared_state_code.buf[self._offset] = state_index
-        # If the state is terminal and there's an event loop, set the asyncio event
-        if new_state in TERMINAL_STATES and self._loop is not None and not self._aio_event.is_set():
+    def _state(self, new_state: State):
+        with torch.inference_mode():
+            self._shared_state_code[...] = ALL_STATES.index(new_state)
+        if self._state in TERMINAL_STATES and self._loop is not None and not self._aio_event.is_set():
             self._set_event_threadsafe()
 
     def _set_event_threadsafe(self):
-        """Set the asyncio event in a thread-safe manner."""
-        if self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._aio_event.set)
-        else:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        async def _event_setter():
             self._aio_event.set()
+
+        if self._loop.is_closed():
+            return  # do nothing, the loop is already closed
+        elif self._loop.is_running() and running_loop == self._loop:
+            asyncio.create_task(_event_setter())
+        elif self._loop.is_running() and running_loop != self._loop:
+            asyncio.run_coroutine_threadsafe(_event_setter(), self._loop)
+        else:
+            self._loop.run_until_complete(_event_setter())
 
     @classmethod
     def _maybe_initialize_mpfuture_backend(cls):
-        """
-        Initialize the multiprocessing backend for the current process if not already done.
-        This includes setting up the shared memory pool and manager.
-        """
         pid = os.getpid()
-        if cls._queue_dict is None or pid not in cls._queue_dict:
-            with cls._initialization_lock:
-                if cls._manager is None:
-                    # Initialize the manager and shared resources
-                    cls._manager = mp.Manager()
-                    cls._queue_dict = cls._manager.dict()
-                    cls._shared_memory_pool = shared_memory.SharedMemory(create=True, size=1000000)  # 1MB for 1M futures
-                    cls._next_offset = cls._manager.Value('i', 0)
-                    cls._offset_lock = cls._manager.Lock()
-                if pid not in cls._queue_dict:
-                    # Set up the queue and background thread for this process
-                    cls._queue_dict[pid] = cls._manager.Queue()
-                    cls._active_pid = pid
-                    cls._active_futures = {}
+        if pid != MPFuture._active_pid:
+            with MPFuture._initialization_lock:
+                if pid != MPFuture._active_pid:
+                    # note: the second if is intentional, see https://en.wikipedia.org/wiki/Double-checked_locking
+                    logger.debug(f"Initializing MPFuture backend for pid {pid}")
+
+                    receiver_pipe, cls._global_sender_pipe = mp.Pipe(duplex=False)
+                    cls._active_pid, cls._active_futures = pid, {}
                     cls._pipe_waiter_thread = threading.Thread(
                         target=cls._process_updates_in_background,
-                        args=[cls._queue_dict[pid]],
+                        args=[receiver_pipe],
                         name=f"{__name__}.BACKEND",
                         daemon=True,
                     )
                     cls._pipe_waiter_thread.start()
 
+    @staticmethod
+    def reset_backend():
+        """Last-resort function to reset internals of MPFuture. All current MPFuture instances will be broken"""
+        MPFuture._active_pid = None
+        MPFuture._initialization_lock = mp.Lock()
+        MPFuture._update_lock = mp.Lock()
+        SharedBytes._lock = mp.Lock()
+
     @classmethod
-    def _process_updates_in_background(cls, update_queue):
-        """Background thread to process updates from the queue."""
+    def _process_updates_in_background(cls, receiver_pipe: mp.connection.Connection):
+        pid = os.getpid()
         while True:
             try:
-                uid, update_type, payload = update_queue.get()
-                future_ref = cls._active_futures.get(uid)
+                if cls._pipe_waiter_thread is not threading.current_thread():
+                    break  # backend was reset, a new background thread has started
+
+                uid, update_type, payload = receiver_pipe.recv()
+                future = None
+                future_ref = cls._active_futures.pop(uid, None)
                 if future_ref is not None:
                     future = future_ref()
-                    if future is not None:
-                        if update_type == UpdateType.RESULT:
-                            future.set_result(payload)
-                        elif update_type == UpdateType.EXCEPTION:
-                            future.set_exception(payload)
-                        elif update_type == UpdateType.CANCEL:
-                            future.cancel()
-            except (BrokenPipeError, EOFError):
-                print("Queue closed, exiting background thread.")
-                break
+
+                if future is None:
+                    # The MPFuture instance is already destroyed in this process
+                    # (the caller is not interested in the result)
+                    continue
+                if update_type == UpdateType.RESULT:
+                    future.set_result(payload)
+                elif update_type == UpdateType.EXCEPTION:
+                    future.set_exception(payload)
+                elif update_type == UpdateType.CANCEL:
+                    future.cancel()
+                else:
+                    raise RuntimeError(f"Received unexpected update type {update_type}")
+            except (BrokenPipeError, EOFError, ConnectionError):
+                logger.debug(f"Update pipe was was shut down unexpectedly (pid={pid})")
             except Exception as e:
-                print(f"Error in background thread: {e}")
+                logger.exception(f"Could not retrieve update: caught {repr(e)} (pid={pid})")
 
     def _send_update(self, update_type: UpdateType, payload: Any = None):
-        """Send an update to the origin process's queue."""
+        """This method sends result, exception or cancel to the MPFuture origin."""
         try:
             with MPFuture._update_lock if self._use_lock else nullcontext():
-                update_queue = MPFuture._queue_dict[self._origin_pid]
-                update_queue.put((self._uid, update_type, payload))
-        except Exception as e:
-            print(f"Error sending update: {e}")
+                self._sender_pipe.send((self._uid, update_type, payload))
+        except (ConnectionError, BrokenPipeError, EOFError, OSError) as e:
+            logger.debug(f"No updates were sent: pipe to origin process was broken ({e})", exc_info=True)
 
     def set_result(self, result: ResultType):
-        """Set the result of the future and notify the origin process if necessary."""
         if os.getpid() == self._origin_pid:
             super().set_result(result)
             MPFuture._active_futures.pop(self._uid, None)
         elif self._state in TERMINAL_STATES:
-            raise InvalidStateError(f"Can't set_result on {self._state} future ({self._uid})")
+            raise InvalidStateError(f"Can't set_result to a future that is {self._state} ({self._uid})")
         else:
-            self._state_cache[self._state] = 'FINISHED'
+            self._state_cache[self._state], self._result = base.FINISHED, result
             self._send_update(UpdateType.RESULT, result)
 
     def set_exception(self, exception: Optional[BaseException]):
-        """Set an exception for the future and notify the origin process if necessary."""
         if os.getpid() == self._origin_pid:
             super().set_exception(exception)
             MPFuture._active_futures.pop(self._uid, None)
         elif self._state in TERMINAL_STATES:
-            raise InvalidStateError(f"Can't set_exception on {self._state} future ({self._uid})")
+            raise InvalidStateError(f"Can't set_exception to a future that is {self._state} ({self._uid})")
         else:
-            self._state_cache[self._state] = 'FINISHED'
+            self._state_cache[self._state], self._exception = base.FINISHED, exception
             self._send_update(UpdateType.EXCEPTION, exception)
 
     def cancel(self) -> bool:
-        """Cancel the future if possible and notify the origin process if necessary."""
         if os.getpid() == self._origin_pid:
             MPFuture._active_futures.pop(self._uid, None)
             return super().cancel()
-        elif self._state in ['RUNNING', 'FINISHED']:
+        elif self._state in [base.RUNNING, base.FINISHED]:
             return False
         else:
-            self._state_cache[self._state] = 'CANCELLED'
+            self._state_cache[self._state] = base.CANCELLED
             self._send_update(UpdateType.CANCEL)
             return True
 
-    def set_running_or_notify_cancel(self) -> bool:
-        """Set the future to RUNNING or notify cancellation."""
-        if self._state == 'PENDING':
-            self._state = 'RUNNING'
+    def set_running_or_notify_cancel(self):
+        if self._state == base.PENDING:
+            self._state = base.RUNNING
             return True
-        elif self._state == 'CANCELLED':
+        elif self._state == base.CANCELLED:
             return False
         else:
-            raise InvalidStateError(f"Can't set running on {self._state} future ({self._uid})")
+            raise InvalidStateError(
+                f"Can't set_running_or_notify_cancel when future is in {self._state} ({self._uid})"
+            )
 
     def result(self, timeout: Optional[float] = None) -> ResultType:
-        """Retrieve the result of the future."""
         if self._state not in TERMINAL_STATES:
             if os.getpid() != self._origin_pid:
-                raise RuntimeError("Only origin process can await result")
+                raise RuntimeError("Only the process that created MPFuture can await result")
             return super().result(timeout)
-        elif self._state == 'CANCELLED':
-            #raise asyncio.CancelledError()
-            raise CancelledError()
+        elif self._state == base.CANCELLED:
+            raise base.CancelledError()
         elif self._exception:
             raise self._exception
         else:
             return self._result
 
     def exception(self, timeout: Optional[float] = None) -> Optional[BaseException]:
-        """Retrieve the exception of the future, if any."""
         if self._state not in TERMINAL_STATES:
             if os.getpid() != self._origin_pid:
-                raise RuntimeError("Only origin process can await exception")
+                raise RuntimeError("Only the process that created MPFuture can await exception")
             return super().exception(timeout)
-        elif self._state == 'CANCELLED':
-            #raise asyncio.CancelledError()
-            raise CancelledError()
+        elif self._state == base.CANCELLED:
+            raise base.CancelledError()
         return self._exception
 
     def done(self) -> bool:
-        """Check if the future is done."""
         return self._state in TERMINAL_STATES
 
-    def running(self) -> bool:
-        """Check if the future is running."""
-        return self._state == 'RUNNING'
+    def running(self):
+        return self._state == base.RUNNING
 
-    def cancelled(self) -> bool:
-        """Check if the future is cancelled."""
-        return self._state == 'CANCELLED'
+    def cancelled(self):
+        return self._state == base.CANCELLED
 
-    def add_done_callback(self, callback: Callable[["MPFuture"], None]):
-        """Add a callback to be called when the future is done."""
+    def add_done_callback(self, callback: Callable[[MPFuture], None]):
         if os.getpid() != self._origin_pid:
-            raise RuntimeError("Only origin process can set callbacks")
+            raise RuntimeError("Only the process that created MPFuture can set callbacks")
         return super().add_done_callback(callback)
 
-    def close(self):
-        """Deprecated method; shared memory is now managed at the class level."""
-        pass
-
     def __await__(self):
-        """Support for async/await syntax."""
         if not self._aio_event:
-            raise RuntimeError("Can't await: no event loop")
+            raise RuntimeError("Can't await: MPFuture was created with no event loop")
         yield from self._aio_event.wait().__await__()
         try:
             return super().result()
-        except asyncio.CancelledError:
-            #raise asyncio.CancelledError()
-            raise CancelledError()
+        except base.CancelledError:
+            raise asyncio.CancelledError()
 
     def __del__(self):
-        """Clean up resources when the future is deleted."""
         if getattr(self, "_origin_pid", None) == os.getpid() and MPFuture._active_futures is not None:
             MPFuture._active_futures.pop(self._uid, None)
         if getattr(self, "_aio_event", None):
             self._aio_event.set()
 
     def __getstate__(self):
-        """Prepare the state for pickling."""
-        state = self.__dict__.copy()
-        state.pop('_condition', None)
-        state.pop('_waiters', None)
-        state.pop('_done_callbacks', None)
-        state.pop('_aio_event', None)
-        state.pop('_loop', None)
-        return state
+        return dict(
+            _sender_pipe=self._sender_pipe,
+            _shared_state_code=ForkingPickler.dumps(self._shared_state_code).tobytes(),
+            _origin_pid=self._origin_pid,
+            _uid=self._uid,
+            _use_lock=self._use_lock,
+            _result=self._result,
+            _exception=self._exception,
+        )
 
     def __setstate__(self, state):
-        """Restore the state after unpickling."""
-        self.__dict__.update(state)
-        self._condition = threading.Condition()
-        self._waiters = []
-        self._done_callbacks = []
+        self._sender_pipe = state["_sender_pipe"]
         try:
-            self._loop = asyncio.get_event_loop()
-            self._aio_event = asyncio.Event()
+            self._shared_state_code = ForkingPickler.loads(state["_shared_state_code"])
         except RuntimeError:
-            self._loop, self._aio_event = None, None
+            # If the origin process garbage-collects all instances of MPFuture using the same shmem buffer,
+            # the underlying buffer is freed, and we will get RuntimeError ("unable to open shared memory object")
+            # here since it is not possible to connect to this buffer anymore. To address this, we just replace
+            # the buffer with a non-shared tensor since the origin process doesn't care about our state anymore.
+            self._shared_state_code = torch.tensor([ALL_STATES.index(base.PENDING)], dtype=torch.uint8)
+        self._origin_pid, self._uid = state["_origin_pid"], state["_uid"]
+        self._result, self._exception = state["_result"], state["_exception"]
+        self._use_lock = state["_use_lock"]
+
+        self._waiters, self._done_callbacks = [], []
+        self._condition = threading.Condition()
+        self._aio_event, self._loop = None, None
+        self._state_cache = {}
