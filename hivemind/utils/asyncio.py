@@ -17,7 +17,7 @@ def switch_to_uvloop() -> asyncio.AbstractEventLoop:
     """stop any running event loops; install uvloop; then create, set and return a new event loop"""
     try:
         asyncio.get_event_loop().stop()  # if we're in jupyter, get rid of its built-in event loop
-    except RuntimeError as error_no_event_loop:
+    except RuntimeError:
         pass  # this allows running DHT from background threads with no event loop
     uvloop.install()
     loop = asyncio.new_event_loop()
@@ -195,3 +195,16 @@ async def enter_asynchronously(context: AbstractContextManager):
     """Wrap a non-async context so that it can be entered asynchronously"""
     async with _AsyncContextWrapper(context) as ret_value:
         yield ret_value
+
+
+def cancel_task_if_running(task: Optional[asyncio.Task]) -> None:
+    """Safely cancel a task if it's still running and the event loop is available."""
+    if task is not None and not task.done():
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                task.cancel()
+        except RuntimeError as e:
+            # Only ignore event loop closure errors
+            if "Event loop is closed" not in str(e):
+                raise

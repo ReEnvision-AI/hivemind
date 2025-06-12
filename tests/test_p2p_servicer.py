@@ -2,13 +2,14 @@ import asyncio
 from typing import AsyncIterator
 
 import pytest
+import pytest_asyncio
 
 from hivemind.p2p import P2P, P2PContext, P2PDaemonError, ServicerBase
 from hivemind.proto import test_pb2
 from hivemind.utils.asyncio import anext
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def server_client():
     server = await P2P.create()
     client = await P2P.create(initial_peers=await server.get_visible_maddrs())
@@ -140,6 +141,7 @@ async def test_unary_stream_cancel(server_client, cancel_reason):
         await asyncio.sleep(0.25)
 
         writer.close()
+        await writer.wait_closed()
     elif cancel_reason == "close_generator":
         stub = ExampleServicer.get_stub(client, server.peer_id)
         iter = await stub.rpc_wait(test_pb2.TestRequest(number=10))

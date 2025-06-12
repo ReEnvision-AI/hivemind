@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict
 
 import pytest
+import pytest_asyncio
 import torch
 
 from hivemind.compression import deserialize_tensor_stream, deserialize_torch_tensor, serialize_torch_tensor
@@ -20,7 +21,7 @@ from hivemind.utils.streaming import split_for_streaming
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client_stub():
     handler_dht = DHT(start=True)
     module_backends = {"expert1": DummyModuleBackend("expert1", k=1), "expert2": DummyModuleBackend("expert2", k=2)}
@@ -71,9 +72,7 @@ async def test_connection_handler_forward(client_stub):
     assert torch.allclose(outputs, inputs * 2)
 
     # forward streaming
-    split = (
-        p for t in [serialize_torch_tensor(inputs_long)] for p in split_for_streaming(t, chunk_size_bytes=2**16)
-    )
+    split = (p for t in [serialize_torch_tensor(inputs_long)] for p in split_for_streaming(t, chunk_size_bytes=2**16))
     output_generator = await client_stub.rpc_forward_stream(
         amap_in_executor(
             lambda tensor_part: runtime_pb2.ExpertRequest(uid="expert2", tensors=[tensor_part]),

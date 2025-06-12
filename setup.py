@@ -139,8 +139,9 @@ class Develop(develop):
         self.run_command("build_py")
         super().run()
 
-
-with open("requirements.txt") as requirements_file:
+req_path = os.path.join(os.getcwd(), "requirements.txt")
+print(f"CURRENT DIR IS {req_path}")
+with open(req_path) as requirements_file:
     install_requires = list(map(str, parse_requirements(requirements_file)))
 
 # loading version from setup.py
@@ -156,7 +157,7 @@ with open("requirements-dev.txt") as dev_requirements_file:
 with open("requirements-docs.txt") as docs_requirements_file:
     extras["docs"] = list(map(str, parse_requirements(docs_requirements_file)))
 
-extras["bitsandbytes"] = ["bitsandbytes~=0.41.1"]
+extras["bitsandbytes"] = ["bitsandbytes~=0.45.2"]
 
 extras["all"] = extras["dev"] + extras["docs"] + extras["bitsandbytes"]
 

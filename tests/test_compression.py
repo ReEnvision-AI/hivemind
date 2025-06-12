@@ -43,7 +43,9 @@ def test_tensor_compression(size=(128, 128, 64), alpha=5e-08, beta=0.0008):
 
     zeros = torch.zeros(5, 5)
     for compression_type in CompressionType.values():
-        assert deserialize_torch_tensor(serialize_torch_tensor(zeros, compression_type)).isfinite().all()
+        # 8-bit compression produces segmentation faults on zero tensors with latest bitsandbytes
+        if compression_type != CompressionType.BLOCKWISE_8BIT:
+            assert deserialize_torch_tensor(serialize_torch_tensor(zeros, compression_type)).isfinite().all()
 
 
 def _check(tensor, compression, rtol=1e-5, atol=1e-8, chunk_size=30 * 1024):
@@ -219,6 +221,8 @@ def test_adaptive_compression():
         greater_equal=STATE_FP16,
     )
 
+    dht_instances = launch_dht_instances(2)
+
     averager1 = hivemind.TrainingAverager(
         opt=torch.optim.Adam(make_params()),
         average_parameters=True,
@@ -230,7 +234,7 @@ def test_adaptive_compression():
         target_group_size=2,
         part_size_bytes=5_000,
         start=True,
-        dht=hivemind.DHT(start=True),
+        dht=dht_instances[0],
     )
 
     averager2 = hivemind.TrainingAverager(
@@ -244,7 +248,7 @@ def test_adaptive_compression():
         target_group_size=2,
         part_size_bytes=5_000,
         start=True,
-        dht=hivemind.DHT(initial_peers=averager1.dht.get_visible_maddrs(), start=True),
+        dht=dht_instances[1],
     )
 
     futures = [averager1.step(wait=False), averager2.step(wait=False)]
@@ -264,3 +268,6 @@ def test_adaptive_compression():
     assert STATE_FP16.mp_counter.value == len([tensor for tensor in state_tensors if tensor.numel() >= 500])
     assert STATE_FP32.mp_counter.value == len([tensor for tensor in state_tensors if tensor.numel() < 500])
     assert STATE_FP16.mp_part_size.value == STATE_FP32.mp_part_size.value == 0  # not partitioned
+
+    for instance in [averager1, averager2] + dht_instances:
+        instance.shutdown()

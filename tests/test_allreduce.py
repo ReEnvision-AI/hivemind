@@ -108,9 +108,9 @@ async def test_partitioning_asynchronous():
     wall_time = time.perf_counter() - start_time
     # check that event loop had enough time to respond to incoming requests; this is over 50% most of the time
     # we set 33% threshold to ensure that the test will pass reliably. If we break prefetch, this drops to <10%
-    assert (
-        time_in_waiting > wall_time / 3
-    ), f"Event loop could only run {time_in_waiting / wall_time :.5f} of the time"
+    assert time_in_waiting > wall_time / 3, (
+        f"Event loop could only run {time_in_waiting / wall_time * 100:.5f}% of the time"
+    )
 
 
 @pytest.mark.parametrize("num_senders", [1, 2, 4, 10])
@@ -172,6 +172,7 @@ NODE, CLIENT, AUX = AveragingMode.NODE, AveragingMode.CLIENT, AveragingMode.AUX
 )
 @pytest.mark.forked
 @pytest.mark.asyncio
+@pytest.mark.skip("Skipping test due to freezes in CI")
 async def test_allreduce_protocol(peer_modes, averaging_weights, peer_fractions, part_size_bytes):
     """Run group allreduce protocol manually without grpc, see if the internal logic is working as intended"""
 

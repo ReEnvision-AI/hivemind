@@ -9,8 +9,6 @@ from contextlib import asynccontextmanager, closing
 from typing import AsyncIterator, Awaitable, Callable, Dict, Iterable, Optional, Sequence, Tuple
 from uuid import UUID, uuid4
 
-from multiaddr import Multiaddr, protocols
-
 from hivemind.p2p.p2p_daemon_bindings.datastructures import PeerID, PeerInfo, StreamInfo
 from hivemind.p2p.p2p_daemon_bindings.utils import (
     DispatchFailure,
@@ -21,7 +19,9 @@ from hivemind.p2p.p2p_daemon_bindings.utils import (
     write_pbmsg,
 )
 from hivemind.proto import p2pd_pb2 as p2pd_pb
+from hivemind.utils.asyncio import cancel_task_if_running
 from hivemind.utils.logging import get_logger
+from hivemind.utils.multiaddr import Multiaddr, protocols
 
 StreamHandler = Callable[[StreamInfo, asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
@@ -43,9 +43,7 @@ def parse_conn_protocol(maddr: Multiaddr) -> int:
     proto_codes = set(proto.code for proto in maddr.protocols())
     proto_cand = proto_codes.intersection(SUPPORT_CONN_PROTOCOLS)
     if len(proto_cand) != 1:
-        raise ValueError(
-            f"connection protocol should be only one protocol out of {SUPPORTED_PROTOS}" f", maddr={maddr}"
-        )
+        raise ValueError(f"connection protocol should be only one protocol out of {SUPPORTED_PROTOS}, maddr={maddr}")
     return tuple(proto_cand)[0]
 
 
@@ -137,10 +135,8 @@ class ControlClient:
         return control
 
     def close(self) -> None:
-        if self._read_task is not None:
-            self._read_task.cancel()
-        if self._write_task is not None:
-            self._write_task.cancel()
+        cancel_task_if_running(self._read_task)
+        cancel_task_if_running(self._write_task)
 
     def __del__(self):
         self.close()
@@ -197,7 +193,7 @@ class ControlClient:
                 self._handler_tasks[call_id] = handler_task
 
             elif call_id in self._handler_tasks and resp.HasField("cancel"):
-                self._handler_tasks[call_id].cancel()
+                cancel_task_if_running(self._handler_tasks[call_id])
 
             elif call_id in self._pending_calls and resp.HasField("daemonError"):
                 daemon_exc = P2PDaemonError(resp.daemonError.message)

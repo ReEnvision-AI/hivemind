@@ -12,7 +12,6 @@ from importlib.resources import path
 from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional, Sequence, Tuple, Type, TypeVar, Union
 
 from google.protobuf.message import Message
-from multiaddr import Multiaddr
 
 import hivemind.hivemind_cli as cli
 import hivemind.p2p.p2p_daemon_bindings.p2pclient as p2pclient
@@ -21,9 +20,10 @@ from hivemind.p2p.p2p_daemon_bindings.datastructures import PeerID, PeerInfo, St
 from hivemind.p2p.p2p_daemon_bindings.utils import ControlFailure
 from hivemind.proto import crypto_pb2
 from hivemind.proto.p2pd_pb2 import RPCError
-from hivemind.utils.asyncio import as_aiter, asingle
+from hivemind.utils.asyncio import as_aiter, asingle, cancel_task_if_running
 from hivemind.utils.crypto import RSAPrivateKey
 from hivemind.utils.logging import get_logger, golog_level_to_python, loglevel, python_level_to_golog
+from hivemind.utils.multiaddr import Multiaddr
 
 logger = get_logger(__name__)
 
@@ -32,7 +32,7 @@ P2PD_FILENAME = "p2pd"
 
 
 @dataclass(frozen=True)
-class P2PContext(object):
+class P2PContext:
     handle_name: str
     local_id: PeerID
     remote_id: PeerID = None
@@ -145,9 +145,9 @@ class P2P:
         :return: a wrapper for the p2p daemon
         """
 
-        assert not (
-            initial_peers and use_ipfs
-        ), "User-defined initial_peers and use_ipfs=True are incompatible, please choose one option"
+        assert not (initial_peers and use_ipfs), (
+            "User-defined initial_peers and use_ipfs=True are incompatible, please choose one option"
+        )
 
         if not all(arg is None for arg in [quic, use_relay_hop, use_relay_discovery]):
             warnings.warn(
@@ -582,7 +582,6 @@ class P2P:
         input: Union[TInputProtobuf, TInputStream],
         output_protobuf_type: Type[Message],
     ) -> Awaitable[TOutputProtobuf]:
-
         if not isinstance(input, AsyncIterableABC):
             return await self._call_unary_protobuf_handler(peer_id, name, input, output_protobuf_type)
 
@@ -648,9 +647,9 @@ class P2P:
         if self._client is not None:
             self._client.close()
         if self._listen_task is not None:
-            self._listen_task.cancel()
+            cancel_task_if_running(self._listen_task)
         if self._reader_task is not None:
-            self._reader_task.cancel()
+            cancel_task_if_running(self._reader_task)
 
         self._alive = False
         if self._child is not None and self._child.returncode is None:

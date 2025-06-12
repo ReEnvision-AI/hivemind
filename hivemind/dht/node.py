@@ -23,7 +23,6 @@ from typing import (
     Union,
 )
 
-from multiaddr import Multiaddr
 from sortedcontainers import SortedSet
 
 from hivemind.dht.crypto import DHTRecord, RecordValidatorBase
@@ -34,6 +33,7 @@ from hivemind.dht.traverse import traverse_dht
 from hivemind.p2p import P2P, PeerID
 from hivemind.utils import MSGPackSerializer, SerializerBase, get_logger
 from hivemind.utils.auth import AuthorizerBase
+from hivemind.utils.multiaddr import Multiaddr
 from hivemind.utils.timed_storage import DHTExpiration, TimedStorage, ValueWithExpiration
 
 logger = get_logger(__name__)
@@ -87,13 +87,13 @@ class DHTNode:
 
     """
 
-    # fmt:off
+    # fmt: off
     node_id: DHTID; is_alive: bool; peer_id: PeerID; num_replicas: int; num_workers: int; protocol: DHTProtocol
     chunk_size: int; refresh_timeout: float; cache_locally: bool; cache_nearest: int; cache_refresh_before_expiry: float
     cache_on_store: bool; reuse_get_requests: bool; pending_get_requests: DefaultDict[DHTID, SortedSet[_SearchState]]
     cache_refresh_task: Optional[asyncio.Task]; cache_refresh_evt: asyncio.Event; cache_refresh_queue: CacheRefreshQueue
     blacklist: Blacklist
-    # fmt:on
+    # fmt: on
 
     @classmethod
     async def create(
@@ -377,9 +377,9 @@ class DHTNode:
         if subkeys is None:
             subkeys = [None] * len(keys)
 
-        assert (
-            len(keys) == len(subkeys) == len(values) == len(expiration_time)
-        ), "Either of keys, values, subkeys or expiration timestamps have different sequence lengths."
+        assert len(keys) == len(subkeys) == len(values) == len(expiration_time), (
+            "Either of keys, values, subkeys or expiration timestamps have different sequence lengths."
+        )
 
         key_id_to_data: DefaultDict[DHTID, List[Tuple[DHTKey, Subkey, DHTValue, DHTExpiration]]] = defaultdict(list)
         for key, subkey, value, expiration in zip(keys, subkeys, values, expiration_time):

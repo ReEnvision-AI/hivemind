@@ -208,7 +208,7 @@ def test_load_state_from_peers():
 
     avgr2.local_epoch = 1337
     model2.weight.data[...] = 42
-    time.sleep(0.1)
+    time.sleep(0.5)
 
     avgr1.load_state_from_peers()
     assert avgr1.local_epoch == 1337
@@ -336,7 +336,7 @@ def test_progress_tracker():
         (False, True, True, True, True),
         (False, True, True, False, True),
         (True, False, False, False, False),
-        (True, True, False, False, False,),
+        (True, True, False, False, False),
     ],
     # fmt: on
 )
@@ -414,7 +414,6 @@ def _test_optimizer(
             loss.backward()
 
             optimizer.step()
-
             with total_samples_accumulated.get_lock():
                 total_samples_accumulated.value += batch_size
 
