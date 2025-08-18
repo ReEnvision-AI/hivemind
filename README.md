@@ -1,11 +1,5 @@
 ## Hivemind: decentralized deep learning in PyTorch
 
-[![Documentation Status](https://readthedocs.org/projects/learning-at-home/badge/?version=latest)](https://learning-at-home.readthedocs.io/en/latest/?badge=latest)
-[![PyPI version](https://img.shields.io/pypi/v/hivemind.svg?color=blue)](https://pypi.org/project/hivemind/)
-[![Discord](https://img.shields.io/static/v1?style=default&label=Discord&logo=discord&message=join)](https://discord.gg/uGugx9zYvN)
-[![CI status](https://github.com/learning-at-home/hivemind/actions/workflows/run-tests.yml/badge.svg?branch=master)](https://github.com/learning-at-home/hivemind/actions)
-![Codecov](https://img.shields.io/codecov/c/github/learning-at-home/hivemind)
-[![Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 Hivemind is a PyTorch library for decentralized deep learning across the Internet. Its intended usage is training one
 large model on hundreds of computers from different universities, companies, and volunteers.
@@ -26,50 +20,62 @@ large model on hundreds of computers from different universities, companies, and
 To learn more about the ideas behind this library,
 see the [full list](#citation) of our papers below.
 
-## Example Use Cases
-
-This section lists projects that leverage hivemind for decentralized training. 
-If you have successfully trained a model or created a downstream repository with the help of our library, 
-feel free to submit a pull request that adds your project to this list.
-
-* **Petals** ([webpage](https://petals.dev), [code](https://github.com/bigscience-workshop/petals)) — a decentralized platform for inference and fine-tuning of 100B+ language models.
-* **Training Transformers Together** ([webpage](https://training-transformers-together.github.io/), [code](https://github.com/learning-at-home/dalle-hivemind)) — a NeurIPS 2021 demonstration that trained a collaborative text-to-image Transformer model.
-* **CALM** ([webpage](https://huggingface.co/CALM), [code](https://github.com/NCAI-Research/CALM)) — a masked language model trained on a combination of Arabic datasets.
-* **sahajBERT** ([blog post](https://huggingface.co/blog/collaborative-training), [code](https://github.com/tanmoyio/sahajbert)) — a collaboratively pretrained ALBERT-xlarge for the Bengali language.
-* **PyTorch Lightning Integration** ([docs](https://lightning.ai/docs/pytorch/stable/integrations/strategies/Hivemind.html)). Integration into PyTorch Lightning allows adapting your existing pipelines to training over slow network with unreliable peers.
-
 ## Installation
 
 Before installing, make sure that your environment has Python 3.8+
 and [PyTorch](https://pytorch.org/get-started/locally/#start-locally) 1.9.0 or newer. They can be installed either
 natively or with [Anaconda](https://www.anaconda.com/products/individual).
 
-You can get [the latest release](https://pypi.org/project/hivemind) with pip or build hivemind from source.
 
 ### With pip
 
 If your versions of Python and PyTorch match the requirements, you can install hivemind from pip:
 
+**Standard installation (GPU-enabled, default):**
 ```
 pip install hivemind
 ```
 
-Also, if you want to use blockwise 8-bit compression from [bitsandbytes](https://github.com/TimDettmers/bitsandbytes) 
-during data transfer, you can install it with `pip install hivemind[bitsandbytes]`. 
-After that, you can use the `BlockwiseQuantization` class in [hivemind.compression](./hivemind/compression)
+**CPU-only installation:**
+```
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install hivemind[cpu]
+```
+
+**Additional extras:**
+- For blockwise 8-bit compression: `pip install hivemind[bitsandbytes]` 
+- For development: `pip install hivemind[dev]`
+- For documentation: `pip install hivemind[docs]`
+
+After installing with bitsandbytes support, you can use the `BlockwiseQuantization` class in [hivemind.compression](./hivemind/compression)
 
 ### From source
 
 To install hivemind from source, simply run the following:
 
+**Standard installation (GPU-enabled):**
 ```
 git clone https://github.com/learning-at-home/hivemind.git
 cd hivemind
 pip install .
 ```
 
-If you would like to verify that your installation is working properly, you can install with `pip install .[dev]`
-instead. Then, you can run the tests with `pytest tests/`.
+**CPU-only installation:**
+```
+git clone https://github.com/learning-at-home/hivemind.git
+cd hivemind
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install .[cpu]
+```
+
+**Development installation:**
+```
+git clone https://github.com/learning-at-home/hivemind.git
+cd hivemind
+pip install .[dev]
+```
+
+Then, you can run the tests with `pytest tests/`.
 
 By default, hivemind uses the precompiled binary of
 the [go-libp2p-daemon](https://github.com/learning-at-home/go-libp2p-daemon) library. If you face compatibility issues

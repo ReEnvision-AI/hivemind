@@ -139,6 +139,7 @@ class Develop(develop):
         self.run_command("build_py")
         super().run()
 
+# Load base requirements (default GPU-enabled)
 req_path = os.path.join(os.getcwd(), "requirements.txt")
 print(f"CURRENT DIR IS {req_path}")
 with open(req_path) as requirements_file:
@@ -157,6 +158,11 @@ with open("requirements-dev.txt") as dev_requirements_file:
 with open("requirements-docs.txt") as docs_requirements_file:
     extras["docs"] = list(map(str, parse_requirements(docs_requirements_file)))
 
+# CPU-only version - same as base requirements but will instruct users to install CPU torch separately
+# We can't specify torch+cpu in setuptools requirements due to syntax limitations
+with open("requirements-cpu.txt") as cpu_requirements_file:
+    extras["cpu"] = list(map(str, parse_requirements(cpu_requirements_file)))
+
 extras["bitsandbytes"] = ["bitsandbytes~=0.45.2"]
 
 extras["all"] = extras["dev"] + extras["docs"] + extras["bitsandbytes"]
@@ -168,9 +174,9 @@ setup(
     description="Decentralized deep learning in PyTorch",
     long_description="Decentralized deep learning in PyTorch. Built to train models on thousands of volunteers "
     "across the world.",
-    author="Learning@home & contributors",
-    author_email="hivemind-team@hotmail.com",
-    url="https://github.com/learning-at-home/hivemind",
+    author="ReEnvision AI",
+    author_email="hivemind@reenvision.ai",
+    url="https://github.com/reenvision-ai/hivemind",
     packages=find_packages(exclude=["tests"]),
     package_data={"hivemind": ["proto/*", "hivemind_cli/*"]},
     include_package_data=True,
@@ -184,8 +190,6 @@ setup(
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Topic :: Scientific/Engineering",
