@@ -4,18 +4,19 @@ import asyncio
 import concurrent.futures._base as base
 import multiprocessing as mp
 import os
+import pickle
 import threading
 import uuid
 from concurrent.futures import InvalidStateError
 from contextlib import nullcontext
 from enum import Enum, auto
-from multiprocessing.reduction import ForkingPickler
 from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 from weakref import ref
 
 import torch  # used for py3.7-compatible shared memory
 
 from hivemind.utils.logging import get_logger
+from hivemind.utils.platform import IS_WINDOWS, get_multiprocessing_context
 
 logger = get_logger(__name__)
 
@@ -28,23 +29,33 @@ ALL_STATES = base.PENDING, base.RUNNING, base.FINISHED, base.CANCELLED, base.CAN
 TERMINAL_STATES = {base.FINISHED, base.CANCELLED, base.CANCELLED_AND_NOTIFIED}
 
 
-class SharedBytes:
+class SharedState:
     """
-    A process-wide object that allocates large chunks of shared memory and partitions it into individual bytes.
+    Cross-platform shared state mechanism for MPFuture.
 
-    Note: this process is only responsible for bulk allocation, it does not manage/free unused bytes.
-    The chunks are deallocated by the garbage collector,
-    when it detects that all processes no longer use any bytes from this chunk.
+    On Unix systems, uses torch shared memory for efficiency with fork-based processes.
+    On Windows, uses multiprocessing.Value for spawn-based process compatibility.
     """
 
     _lock = mp.Lock()
     _pid: Optional[PID] = None
     _buffer: Optional[torch.Tensor] = None
     _index: int = 0
+    _mp_values: Dict[UID, Any] = {}
 
     @classmethod
-    def next(cls) -> torch.Tensor:
-        """Create another shared byte value, represented as a scalar uint8 tensor"""
+    def next(cls) -> Any:
+        """Create another shared state value"""
+        if IS_WINDOWS:
+            # On Windows, use multiprocessing.Value for cross-process state sharing
+            return cls._next_mp_value()
+        else:
+            # On Unix, use torch shared memory for efficiency
+            return cls._next_torch_byte()
+
+    @classmethod
+    def _next_torch_byte(cls) -> torch.Tensor:
+        """Create shared byte using torch shared memory (Unix only)"""
         with cls._lock:
             if cls._pid != os.getpid() or cls._buffer is None or cls._index >= len(cls._buffer):
                 buffer_size = int(os.environ.get("HIVEMIND_SHM_BUFFER_SIZE", 16))
@@ -54,6 +65,26 @@ class SharedBytes:
 
             cls._index += 1
             return cls._buffer[cls._index - 1]
+
+    @classmethod
+    def _next_mp_value(cls) -> Any:
+        """Create shared value using multiprocessing.Value (Windows compatible)"""
+        # Create a unique identifier
+        uid = uuid.uuid4().int
+
+        # Use multiprocessing.Value with explicit 'i' type code for integer state
+        # This works with both fork and spawn process models
+        mp_context = get_multiprocessing_context()
+        shared_value = mp_context.Value('i', 0)  # Initialize to 0 (PENDING state)
+
+        # Store reference for cleanup
+        cls._mp_values[uid] = shared_value
+
+        return shared_value
+
+
+# For backward compatibility
+SharedBytes = SharedState
 
 
 class UpdateType(Enum):
@@ -90,7 +121,7 @@ class MPFuture(base.Future, Generic[ResultType]):
         self._maybe_initialize_mpfuture_backend()
 
         self._origin_pid, self._uid = os.getpid(), uuid.uuid4().int
-        self._shared_state_code = SharedBytes.next()
+        self._shared_state_code = SharedState.next()
         self._state_cache: Dict[State, State] = {}
         # mapping from global to cached local future used that makes updates immediately
         # available on setter side; dictionary-based cache works because future can visit any state at most once
@@ -99,9 +130,30 @@ class MPFuture(base.Future, Generic[ResultType]):
         self._state, self._result, self._exception = base.PENDING, None, None
         self._use_lock = use_lock
 
+        # Initialize shared state to PENDING
+        self._set_shared_state(base.PENDING)
+
         assert self._uid not in MPFuture._active_futures
         MPFuture._active_futures[self._uid] = ref(self)
         self._sender_pipe = MPFuture._global_sender_pipe
+
+    def _set_shared_state(self, state: State) -> None:
+        """Set the shared state value in a cross-platform manner"""
+        if IS_WINDOWS:
+            # On Windows, _shared_state_code is a multiprocessing.Value
+            self._shared_state_code.value = ALL_STATES.index(state)
+        else:
+            # On Unix, _shared_state_code is a torch tensor
+            self._shared_state_code[0] = ALL_STATES.index(state)
+
+    def _get_shared_state(self) -> State:
+        """Get the shared state value in a cross-platform manner"""
+        if IS_WINDOWS:
+            # On Windows, _shared_state_code is a multiprocessing.Value
+            return ALL_STATES[self._shared_state_code.value]
+        else:
+            # On Unix, _shared_state_code is a torch tensor
+            return ALL_STATES[int(self._shared_state_code[0].item())]
 
         try:
             self._loop = asyncio.get_event_loop()
@@ -111,13 +163,12 @@ class MPFuture(base.Future, Generic[ResultType]):
 
     @property
     def _state(self) -> State:
-        shared_state = ALL_STATES[self._shared_state_code.item()]
+        shared_state = self._get_shared_state()
         return self._state_cache.get(shared_state, shared_state)
 
     @_state.setter
     def _state(self, new_state: State):
-        with torch.inference_mode():
-            self._shared_state_code[...] = ALL_STATES.index(new_state)
+        self._set_shared_state(new_state)
         if self._state in TERMINAL_STATES and self._loop is not None and not self._aio_event.is_set():
             self._set_event_threadsafe()
 
@@ -298,9 +349,11 @@ class MPFuture(base.Future, Generic[ResultType]):
             self._aio_event.set()
 
     def __getstate__(self):
+        # Use cross-platform pickle instead of ForkingPickler
+        serialized_state = pickle.dumps(self._shared_state_code)
         return dict(
             _sender_pipe=self._sender_pipe,
-            _shared_state_code=ForkingPickler.dumps(self._shared_state_code).tobytes(),
+            _shared_state_code=serialized_state,
             _origin_pid=self._origin_pid,
             _uid=self._uid,
             _use_lock=self._use_lock,
@@ -311,13 +364,20 @@ class MPFuture(base.Future, Generic[ResultType]):
     def __setstate__(self, state):
         self._sender_pipe = state["_sender_pipe"]
         try:
-            self._shared_state_code = ForkingPickler.loads(state["_shared_state_code"])
-        except RuntimeError:
-            # If the origin process garbage-collects all instances of MPFuture using the same shmem buffer,
-            # the underlying buffer is freed, and we will get RuntimeError ("unable to open shared memory object")
-            # here since it is not possible to connect to this buffer anymore. To address this, we just replace
-            # the buffer with a non-shared tensor since the origin process doesn't care about our state anymore.
-            self._shared_state_code = torch.tensor([ALL_STATES.index(base.PENDING)], dtype=torch.uint8)
+            self._shared_state_code = pickle.loads(state["_shared_state_code"])
+        except (RuntimeError, pickle.PickleError, AttributeError) as e:
+            # Handle shared memory connection errors and deserialization errors
+            # On Windows with spawn, or when shared memory is unavailable,
+            # create a fallback non-shared state
+            logger.debug(f"Could not restore shared state, using fallback: {e}")
+            if IS_WINDOWS:
+                # On Windows, create a new multiprocessing.Value
+                mp_context = get_multiprocessing_context()
+                self._shared_state_code = mp_context.Value('i', ALL_STATES.index(base.PENDING))
+            else:
+                # On Unix, create a fallback tensor
+                self._shared_state_code = torch.tensor([ALL_STATES.index(base.PENDING)], dtype=torch.uint8)
+
         self._origin_pid, self._uid = state["_origin_pid"], state["_uid"]
         self._result, self._exception = state["_result"], state["_exception"]
         self._use_lock = state["_use_lock"]

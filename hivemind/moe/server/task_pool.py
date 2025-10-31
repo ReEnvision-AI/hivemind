@@ -17,12 +17,13 @@ import torch
 
 from hivemind.utils import get_logger
 from hivemind.utils.mpfuture import InvalidStateError, MPFuture
+from hivemind.utils.processing import get_process_class
 
 logger = get_logger(__name__)
 Task = namedtuple("Task", ("future", "args"))
 
 
-class TaskPoolBase(mp.context.ForkProcess, metaclass=ABCMeta):
+class TaskPoolBase(get_process_class(), metaclass=ABCMeta):
     """A pool that accepts tasks and forms batches for parallel processing, interacts with Runtime"""
 
     def __init__(self, process_func: callable, daemon=True, **kwargs):

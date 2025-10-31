@@ -19,7 +19,39 @@ from test_utils.networking import get_free_port
 
 
 def is_process_running(pid: int) -> bool:
-    return subprocess.run(["ps", "-p", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    """
+    Check if a process with the given PID is running.
+    Cross-platform implementation that works on both Unix and Windows.
+    """
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        # Fallback to platform-specific checks if psutil is not available
+        import sys
+        if sys.platform.startswith('win'):
+            # Windows-specific check using tasklist
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    shell=True
+                )
+                return str(pid) in result.stdout
+            except (subprocess.SubprocessError, FileNotFoundError):
+                return False
+        else:
+            # Unix-specific check using ps command
+            try:
+                return subprocess.run(
+                    ["ps", "-p", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                ).returncode == 0
+            except (subprocess.SubprocessError, FileNotFoundError):
+                return False
 
 
 async def replicate_if_needed(p2p: P2P, replicate: bool) -> P2P:

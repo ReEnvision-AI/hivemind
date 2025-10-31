@@ -20,11 +20,25 @@ large model on hundreds of computers from different universities, companies, and
 To learn more about the ideas behind this library,
 see the [full list](#citation) of our papers below.
 
+## Supported Platforms
+
+- **Linux** (Ubuntu 18.04+, CentOS 7+, etc.) - Full support with optimal performance
+- **macOS** (10.14+) - Full support with good performance
+- **Windows 10+** (1903+) - **NEW!** Native Windows support with cross-platform compatibility
+
 ## Installation
 
 Before installing, make sure that your environment has Python 3.8+
 and [PyTorch](https://pytorch.org/get-started/locally/#start-locally) 1.9.0 or newer. They can be installed either
 natively or with [Anaconda](https://www.anaconda.com/products/individual).
+
+### Windows Requirements
+
+For Windows users, additional requirements apply:
+- **Go 1.19+** (for building p2pd daemon)
+- **Visual Studio Build Tools** (for C++ extensions)
+
+See the [Windows Support Guide](docs/windows_support.md) for detailed Windows installation instructions.
 
 
 ### With pip

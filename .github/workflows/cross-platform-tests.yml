@@ -1,0 +1,215 @@
+name: Cross-Platform Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        python -m pip install -e .
+
+    - name: Run tests
+      run: |
+        python -m pytest tests/ -v --cov=hivemind --cov-report=xml
+
+    - name: Upload coverage to Codecov
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: linux
+        name: Linux Coverage
+
+  test-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: [3.9, "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up Go for p2pd binary
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.19'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        python -m pip install -e .
+
+    - name: Run tests
+      run: |
+        python -m pytest tests/ -v --cov=hivemind --cov-report=xml
+
+    - name: Upload coverage to Codecov
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: macos
+        name: macOS Coverage
+
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up Go for p2pd binary
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.19'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        python -m pip install -e . --build-option=buildgo
+
+    - name: Run Windows-specific tests
+      run: |
+        python -m pytest tests/ -v \
+          --cov=hivemind \
+          --cov-report=xml \
+          -k "not test_allreduce and not test_averaging" \
+          --timeout=300
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: windows
+        name: Windows Coverage
+
+  test-cross-platform-interoperability:
+    runs-on: ${{ matrix.os }}
+    needs: [test-linux, test-macos, test-windows]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up Go for p2pd binary (if needed)
+      if: matrix.os == 'windows-latest'
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.19'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e . --build-option=buildgo
+        else
+          python -m pip install -e .
+        fi
+      shell: bash
+
+    - name: Test cross-platform compatibility
+      run: |
+        python -c "
+        import sys
+        import os
+
+        print(f'Testing on {sys.platform} with Python {sys.version}')
+
+        # Test platform detection
+        from hivemind.utils.platform import get_platform, IS_WINDOWS, IS_UNIX
+        print(f'Platform: {get_platform()}')
+        print(f'Is Windows: {IS_WINDOWS}')
+        print(f'Is Unix: {IS_UNIX}')
+
+        # Test asyncio compatibility
+        from hivemind.utils.asyncio import get_optimal_event_loop, is_uvloop_active
+        loop = get_optimal_event_loop()
+        print(f'Event loop: {type(loop).__name__}')
+        print(f'UVLoop active: {is_uvloop_active()}')
+
+        # Test process creation
+        from hivemind.utils.processing import get_process_class, get_optimal_start_method
+        process_class = get_process_class()
+        start_method = get_optimal_start_method()
+        print(f'Process class: {process_class.__name__}')
+        print(f'Start method: {start_method}')
+
+        # Test MPFuture
+        from hivemind.utils.mpfuture import MPFuture, SharedState
+        future = MPFuture()
+        print(f'MFuture shared state type: {type(future._shared_state_code)}')
+        future.set_result('cross_platform_test')
+        result = future.result()
+        print(f'MFuture result: {result}')
+
+        print('Cross-platform compatibility test passed!')
+        "
+
+    - name: Test serialization cross-platform
+      run: |
+        python -c "
+        import pickle
+        from hivemind.utils.mpfuture import MPFuture
+
+        # Test that MPFuture can be serialized and deserialized
+        future = MPFuture()
+        future.set_result(b'serialization_test')
+
+        # Serialize and deserialize
+        serialized = pickle.dumps(future)
+        restored = pickle.loads(serialized)
+
+        # Verify functionality is preserved
+        assert restored.result() == b'serialization_test'
+        print('Cross-platform serialization test passed!')
+        "

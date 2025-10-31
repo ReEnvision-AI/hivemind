@@ -25,6 +25,10 @@ P2P_BINARY_HASH = {
     "p2pd-darwin-arm64": "0404981a9c2b7cab5425ead2633d006c61c2c7ec85ac564ef69413ed470e65bd",
     "p2pd-linux-amd64": "42f8f48e62583b97cdba3c31439c08029fb2b9fc506b5bdd82c46b7cc1d279d8",
     "p2pd-linux-arm64": "046f18480c785a84bdf139d7486086d379397ca106cb2f0191598da32f81447a",
+    # Windows binaries - TODO: Add actual hashes after building Windows binaries
+    # These are placeholder hashes that will trigger build-from-source behavior
+    "p2pd-windows-amd64": None,  # Will trigger build from source
+    "p2pd-windows-arm64": None,  # Will trigger build from source
 }
 
 here = os.path.abspath(os.path.dirname(__file__))
@@ -59,11 +63,22 @@ def proto_compile(output_path):
 
 
 def build_p2p_daemon():
-    result = subprocess.run("go version", capture_output=True, shell=True).stdout.decode("ascii", "replace")
-    m = re.search(r"^go version go([\d.]+)", result)
+    # Check for Go installation with platform-appropriate command
+    try:
+        if platform.system().lower() == "windows":
+            result = subprocess.run(["go", "version"], capture_output=True, text=True, shell=True)
+        else:
+            result = subprocess.run(["go", "version"], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise FileNotFoundError("Could not find golang installation")
+
+        m = re.search(r"^go version go([\d.]+)", result.stdout)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        raise FileNotFoundError("Could not find golang installation. Please install Go from https://golang.org/")
 
     if m is None:
-        raise FileNotFoundError("Could not find golang installation")
+        raise FileNotFoundError("Could not parse golang version")
     version = parse_version(m.group(1))
     if version < parse_version("1.13"):
         raise EnvironmentError(f"Newer version of go required: must be >= 1.13, found {version}")
@@ -75,12 +90,40 @@ def build_p2p_daemon():
         with tarfile.open(dest, "r:gz") as tar:
             tar.extractall(tempdir)
 
+        # Determine binary name based on platform
+        if platform.system().lower() == "windows":
+            binary_name = "p2pd.exe"
+        else:
+            binary_name = "p2pd"
+
+        binary_path = os.path.join(here, "hivemind", "hivemind_cli", binary_name)
+
+        # Build for current platform
+        env = os.environ.copy()
+        # Set GOOS and GOARCH for cross-compilation if needed
+        if platform.system().lower() == "windows":
+            env["GOOS"] = "windows"
+            if platform.machine().lower() in ("x86_64", "amd64"):
+                env["GOARCH"] = "amd64"
+            elif platform.machine().lower() in ("arm64", "aarch64"):
+                env["GOARCH"] = "arm64"
+
+        build_cmd = ["go", "build", "-o", binary_path]
+
         result = subprocess.run(
-            ["go", "build", "-o", os.path.join(here, "hivemind", "hivemind_cli", "p2pd")],
+            build_cmd,
             cwd=os.path.join(tempdir, f"go-libp2p-daemon-{P2PD_VERSION.lstrip('v')}", "p2pd"),
+            env=env,
+            shell=(platform.system().lower() == "windows")
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to build p2pd: exited with status code: {result.returncode}")
+
+        # On Windows, also copy to p2pd (without .exe) for compatibility with existing code
+        if platform.system().lower() == "windows":
+            p2pd_nopath = os.path.join(here, "hivemind", "hivemind_cli", "p2pd")
+            import shutil
+            shutil.copy2(binary_path, p2pd_nopath)
 
 
 def download_p2p_daemon():
@@ -92,6 +135,9 @@ def download_p2p_daemon():
         arch = "amd64"
     if arch in ("aarch64", "aarch64_be", "armv8b", "armv8l"):
         arch = "arm64"
+    if platform.system().lower() == "windows" and arch == "amd64":
+        arch = "amd64"  # Windows uses standard amd64 architecture name
+
     binary_name = f"p2pd-{platform.system().lower()}-{arch}"
 
     if binary_name not in P2P_BINARY_HASH:
@@ -100,6 +146,12 @@ def download_p2p_daemon():
             f"Please install Go and build it from source: https://github.com/learning-at-home/hivemind#from-source"
         )
     expected_hash = P2P_BINARY_HASH[binary_name]
+
+    # Handle None hash (build from source) or missing binary
+    if expected_hash is None:
+        print(f"No precompiled binary available for {binary_name}. Building from source...")
+        build_p2p_daemon()
+        return
 
     if sha256(binary_path) != expected_hash:
         binary_url = os.path.join(P2PD_BINARY_URL, binary_name)

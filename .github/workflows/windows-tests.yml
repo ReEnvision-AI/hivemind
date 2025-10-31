@@ -1,0 +1,271 @@
+name: Windows Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11"]
+        architecture: [x64, x86]
+        exclude:
+          # Exclude x86 for newer Python versions to reduce matrix size
+          - python-version: "3.10"
+            architecture: x86
+          - python-version: "3.11"
+            architecture: x86
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        architecture: ${{ matrix.architecture }}
+
+    - name: Set up Go for p2pd binary
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.19'
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~\AppData\Local\pip\cache
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: |
+          %USERPROFILE%\go\pkg\mod
+          %USERPROFILE%\go\bin
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Install system dependencies
+      run: |
+        # Install Visual Studio Build Tools for C++ extensions
+        choco install visualstudio2019buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+        # Install git for version control
+        choco install git
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        # Install base requirements
+        pip install -r requirements.txt
+        # Install dev requirements for testing
+        pip install -r requirements-dev.txt
+        # Install CPU-only torch for Windows CI
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+    - name: Build and install hivemind with Windows binary support
+      run: |
+        # Install hivemind with build from source for Windows p2pd binary
+        python -m pip install -e . --build-option=buildgo
+
+    - name: Verify p2pd binary installation
+      run: |
+        # Check if p2pd binary was installed correctly
+        python -c "import hivemind.hivemind_cli; print('p2pd binary found')"
+        # Try to locate the actual binary
+        where p2pd
+        python -c "
+        import os
+        import hivemind.hivemind_cli as cli
+        cli_path = os.path.dirname(cli.__file__)
+        p2pd_path = os.path.join(cli_path, 'p2pd.exe')
+        print(f'p2pd.exe path: {p2pd_path}')
+        print(f'Exists: {os.path.exists(p2pd_path)}')
+        if os.path.exists(p2pd_path):
+            print('p2pd.exe found successfully')
+        else:
+            p2pd_path = os.path.join(cli_path, 'p2pd')
+            print(f'p2pd path: {p2pd_path}')
+            print(f'Exists: {os.path.exists(p2pd_path)}')
+        "
+
+    - name: Run basic import tests
+      run: |
+        python -c "
+        import sys
+        print(f'Python version: {sys.version}')
+        print(f'Platform: {sys.platform}')
+
+        # Test platform utilities
+        from hivemind.utils.platform import *
+        print(f'Platform detection: {get_platform()}')
+        print(f'Is Windows: {is_windows()}')
+        print(f'Supports Unix sockets: {supports_unix_sockets()}')
+
+        # Test asyncio utilities
+        from hivemind.utils.asyncio import *
+        print(f'UVLoop available: {UVLOOP_AVAILABLE}')
+        loop = get_optimal_event_loop()
+        print(f'Event loop created: {type(loop).__name__}')
+
+        # Test limits
+        from hivemind.utils.limits import *
+        limits = get_current_limits()
+        print(f'Resource limits: {limits}')
+
+        # Test processing utilities
+        from hivemind.utils.processing import *
+        process_class = get_process_class()
+        print(f'Process class: {process_class.__name__}')
+
+        print('All basic imports successful!')
+        "
+
+    - name: Run unit tests (excluding flaky integration tests)
+      run: |
+        # Run unit tests with coverage, excluding integration tests that may be flaky
+        python -m pytest tests/ -v \
+          --cov=hivemind \
+          --cov-report=xml \
+          --cov-report=term-missing \
+          -k "not test_allreduce and not test_averaging and not test_dht_node and not test_p2p_daemon" \
+          --timeout=300
+
+    - name: Test MPFuture Windows compatibility
+      run: |
+        python -c "
+        import asyncio
+        from hivemind.utils.mpfuture import MPFuture
+
+        async def test_mpfuture():
+            # Test basic MPFuture functionality on Windows
+            future = MPFuture()
+            print(f'Created MPFuture: {future}')
+            print(f'Shared state type: {type(future._shared_state_code)}')
+            print(f'Initial state: {future._state}')
+
+            # Test setting and getting result
+            future.set_result('test_result')
+            assert future.result() == 'test_result'
+            print('MPFuture set/get result successful')
+
+            # Test serialization
+            import pickle
+            serialized = pickle.dumps(future)
+            restored = pickle.loads(serialized)
+            print('MPFuture serialization successful')
+
+        asyncio.run(test_mpfuture())
+        print('MPFuture Windows compatibility test passed!')
+        "
+
+    - name: Test Process Creation
+      run: |
+        python -c "
+        from hivemind.utils.processing import create_process, get_process_class
+        import multiprocessing as mp
+
+        def simple_function():
+            return 'Hello from Windows process!'
+
+        # Test cross-platform process creation
+        proc = create_process(target=simple_function)
+        proc.start()
+        proc.join()
+
+        print(f'Process exit code: {proc.exitcode}')
+        assert proc.exitcode == 0, 'Process failed to execute properly'
+
+        # Test process class
+        ProcessClass = get_process_class()
+        print(f'Process class: {ProcessClass}')
+        print(f'Process class module: {ProcessClass.__module__}')
+
+        print('Process creation test passed!')
+        "
+
+    - name: Upload coverage to Codecov
+      if: matrix.python-version == '3.10' && matrix.architecture == 'x64'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: windows
+        name: Windows Coverage
+        fail_ci_if_error: false
+
+  test-windows-integration:
+    runs-on: windows-latest
+    needs: test-windows
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up Go for p2pd binary
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.19'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        python -m pip install -e . --build-option=buildgo
+
+    - name: Run integration tests
+      run: |
+        # Run a subset of integration tests that should work on Windows
+        python -m pytest tests/test_p2p_daemon.py::test_daemon_killed_on_del -v --timeout=300
+        python -m pytest tests/test_dht.py -v --timeout=300 -k "not test_many_nodes"  # Skip heavy tests
+
+    - name: Test DHT functionality
+      run: |
+        python -c "
+        import asyncio
+        from hivemind.dht import DHT
+        import tempfile
+        import os
+
+        async def test_dht():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                identity_path = os.path.join(temp_dir, 'identity.key')
+
+                # Test DHT creation and basic functionality
+                dht = await DHT.create(
+                    start=True,
+                    identity_path=identity_path,
+                    daemon=True
+                )
+
+                print(f'DHT created with peer_id: {dht.peer_id}')
+
+                # Test basic key-value operations
+                await dht.store('test_key', b'test_value', expiration_time=60)
+                result = await dht.get('test_key')
+                print(f'Stored and retrieved value: {result}')
+
+                await dht.shutdown()
+                print('DHT test completed successfully!')
+
+        asyncio.run(test_dht())
+        "

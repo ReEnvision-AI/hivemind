@@ -24,6 +24,7 @@ from hivemind.utils.asyncio import as_aiter, asingle, cancel_task_if_running
 from hivemind.utils.crypto import RSAPrivateKey
 from hivemind.utils.logging import get_logger, golog_level_to_python, loglevel, python_level_to_golog
 from hivemind.utils.multiaddr import Multiaddr
+from hivemind.utils.platform import IS_WINDOWS
 
 logger = get_logger(__name__)
 
@@ -70,6 +71,43 @@ class P2P:
         "private": {"forceReachabilityPrivate": 1},
     }
     _UNIX_SOCKET_PREFIX = "/unix/tmp/hivemind-"
+    _TCP_SOCKET_HOST = "127.0.0.1"  # localhost for TCP sockets on Windows
+
+    @classmethod
+    def _generate_socket_addresses(cls, socket_uid: str) -> Tuple[Multiaddr, Multiaddr]:
+        """
+        Generate socket addresses for daemon and client communication.
+        Uses Unix domain sockets on Unix-like systems and TCP sockets on Windows.
+
+        Args:
+            socket_uid: Unique identifier for the socket addresses
+
+        Returns:
+            Tuple of (daemon_listen_maddr, client_listen_maddr)
+        """
+        if IS_WINDOWS:
+            # Use TCP sockets on Windows
+            import socket as std_socket
+
+            # Find available ports
+            daemon_sock = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_STREAM)
+            daemon_sock.bind((cls._TCP_SOCKET_HOST, 0))
+            daemon_port = daemon_sock.getsockname()[1]
+            daemon_sock.close()
+
+            client_sock = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_STREAM)
+            client_sock.bind((cls._TCP_SOCKET_HOST, 0))
+            client_port = client_sock.getsockname()[1]
+            client_sock.close()
+
+            daemon_listen_maddr = Multiaddr(f"/ip4/{cls._TCP_SOCKET_HOST}/tcp/{daemon_port}")
+            client_listen_maddr = Multiaddr(f"/ip4/{cls._TCP_SOCKET_HOST}/tcp/{client_port}")
+        else:
+            # Use Unix domain sockets on Unix-like systems
+            daemon_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pd-{socket_uid}.sock")
+            client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")
+
+        return daemon_listen_maddr, client_listen_maddr
 
     def __init__(self):
         self.peer_id = None
@@ -162,8 +200,7 @@ class P2P:
             p2pd_path = p
 
         socket_uid = secrets.token_urlsafe(8)
-        self._daemon_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pd-{socket_uid}.sock")
-        self._client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")
+        self._daemon_listen_maddr, self._client_listen_maddr = cls._generate_socket_addresses(socket_uid)
         if announce_maddrs is not None:
             for addr in announce_maddrs:
                 addr = Multiaddr(addr)
@@ -305,7 +342,8 @@ class P2P:
 
         socket_uid = secrets.token_urlsafe(8)
         self._daemon_listen_maddr = daemon_listen_maddr
-        self._client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")
+        # Generate client socket address using the same method as in create()
+        _, self._client_listen_maddr = cls._generate_socket_addresses(socket_uid)
 
         self._client = await p2pclient.Client.create(self._daemon_listen_maddr, self._client_listen_maddr)
 
@@ -657,10 +695,21 @@ class P2P:
                 self._child.terminate()
                 logger.debug(f"Terminated p2pd with id = {self.peer_id}")
 
+            # Clean up daemon socket
+            if IS_WINDOWS:
+                # On Windows, TCP sockets don't need file cleanup
+                pass
+            else:
+                with suppress(FileNotFoundError, TypeError):
+                    os.remove(self._daemon_listen_maddr["unix"])
+
+        # Clean up client socket
+        if IS_WINDOWS:
+            # On Windows, TCP sockets don't need file cleanup
+            pass
+        else:
             with suppress(FileNotFoundError, TypeError):
-                os.remove(self._daemon_listen_maddr["unix"])
-        with suppress(FileNotFoundError, TypeError):
-            os.remove(self._client_listen_maddr["unix"])
+                os.remove(self._client_listen_maddr["unix"])
 
     @staticmethod
     def _make_process_args(*args, **kwargs) -> List[str]:

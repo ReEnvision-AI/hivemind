@@ -13,13 +13,14 @@ from hivemind.p2p.p2p_daemon import DEFAULT_MAX_MSG_SIZE, P2P
 from hivemind.proto import runtime_pb2
 from hivemind.utils import MPFuture, MSGPackSerializer, as_aiter, get_logger, nested_flatten
 from hivemind.utils.asyncio import amap_in_executor, switch_to_uvloop
+from hivemind.utils.processing import get_process_class
 from hivemind.utils.streaming import split_for_streaming
 from hivemind.utils.tensor_descr import BatchTensorDescriptor
 
 logger = get_logger(__name__)
 
 
-class ConnectionHandler(mp.context.ForkProcess, ServicerBase):
+class ConnectionHandler(get_process_class(), ServicerBase):
     """
     A process that accepts incoming requests to experts and submits them into the corresponding TaskPool.
 

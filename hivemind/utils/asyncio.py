@@ -5,24 +5,102 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from typing import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterable, Optional, Tuple, TypeVar, Union
 
-import uvloop
-
 from hivemind.utils.logging import get_logger
+from hivemind.utils.platform import IS_WINDOWS, SUPPORTS_UVLOOP, get_default_event_loop_policy
+
+# Try to import uvloop only on supported platforms
+if SUPPORTS_UVLOOP:
+    try:
+        import uvloop
+        UVLOOP_AVAILABLE = True
+    except ImportError:
+        UVLOOP_AVAILABLE = False
+        logger.debug("uvloop is supported but not installed")
+else:
+    UVLOOP_AVAILABLE = False
+    uvloop = None
 
 T = TypeVar("T")
 logger = get_logger(__name__)
 
 
 def switch_to_uvloop() -> asyncio.AbstractEventLoop:
-    """stop any running event loops; install uvloop; then create, set and return a new event loop"""
+    """
+    Stop any running event loops; install uvloop if available and supported;
+    then create, set and return a new event loop.
+
+    On Windows or when uvloop is unavailable, falls back to the default asyncio event loop.
+    """
     try:
         asyncio.get_event_loop().stop()  # if we're in jupyter, get rid of its built-in event loop
     except RuntimeError:
         pass  # this allows running DHT from background threads with no event loop
-    uvloop.install()
+
+    # Install uvloop if available and supported
+    if UVLOOP_AVAILABLE:
+        logger.debug("Installing uvloop event loop")
+        uvloop.install()
+    else:
+        if IS_WINDOWS:
+            logger.debug("Using default Windows event loop (uvloop not supported)")
+        else:
+            logger.debug("Using default asyncio event loop (uvloop not available)")
+
+    # Use appropriate event loop policy for the platform
+    if IS_WINDOWS:
+        asyncio.set_event_loop_policy(get_default_event_loop_policy())
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     return loop
+
+
+def get_optimal_event_loop() -> asyncio.AbstractEventLoop:
+    """
+    Get the most appropriate event loop for the current platform.
+
+    Returns:
+        The best available event loop for the current platform
+    """
+    if UVLOOP_AVAILABLE:
+        # uvloop is available and supported
+        return switch_to_uvloop()
+    else:
+        # Use platform-appropriate default event loop
+        if IS_WINDOWS:
+            asyncio.set_event_loop_policy(get_default_event_loop_policy())
+
+        try:
+            # Try to get existing event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Create new loop if current one is running
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            # No event loop exists, create one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        return loop
+
+
+def is_uvloop_active() -> bool:
+    """
+    Check if uvloop is currently being used for the event loop.
+
+    Returns:
+        True if uvloop is active, False otherwise
+    """
+    if not UVLOOP_AVAILABLE:
+        return False
+
+    try:
+        loop = asyncio.get_event_loop()
+        # Check if the loop class is from uvloop
+        return 'uvloop' in type(loop).__module__
+    except RuntimeError:
+        return False
 
 
 async def anext(aiter: AsyncIterator[T]) -> Union[T, StopAsyncIteration]:

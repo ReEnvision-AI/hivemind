@@ -13,13 +13,14 @@ from hivemind.dht.validation import CompositeValidator, RecordValidatorBase
 from hivemind.p2p import P2P, PeerID
 from hivemind.utils import MPFuture, get_logger, switch_to_uvloop
 from hivemind.utils.multiaddr import Multiaddr
+from hivemind.utils.processing import get_process_class
 from hivemind.utils.timed_storage import DHTExpiration, ValueWithExpiration
 
 logger = get_logger(__name__)
 ReturnType = TypeVar("ReturnType")
 
 
-class DHT(mp.context.ForkProcess):
+class DHT(get_process_class()):
     """
     A high-level interface to a hivemind DHT that runs a single DHT node in a background process.
     * hivemind servers periodically announce their experts via declare_experts (dht_handler.py)

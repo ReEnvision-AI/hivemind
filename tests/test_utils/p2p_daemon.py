@@ -52,8 +52,18 @@ class Daemon:
         self._run()
 
     def _start_logging(self):
+        import sys
+        import tempfile
+
         name_control_maddr = str(self.control_maddr).replace("/", "_").replace(".", "_")
-        self.log_filename = f"/tmp/log_p2pd{name_control_maddr}.txt"
+
+        # Use platform-appropriate temporary directory
+        if sys.platform.startswith('win'):
+            temp_dir = tempfile.gettempdir()
+            self.log_filename = f"{temp_dir}\\log_p2pd{name_control_maddr}.txt"
+        else:
+            self.log_filename = f"/tmp/log_p2pd{name_control_maddr}.txt"
+
         self.f_log = open(self.log_filename, "wb")
 
     def _run(self):
@@ -106,9 +116,31 @@ class ConnectionFailure(Exception):
 
 @asynccontextmanager
 async def make_p2pd_pair_unix(enable_control, enable_connmgr, enable_dht, enable_pubsub):
+    from hivemind.utils.platform import IS_WINDOWS
+
     name = str(uuid.uuid4())[:8]
-    control_maddr = Multiaddr(f"/unix/tmp/test_p2pd_control_{name}.sock")
-    listen_maddr = Multiaddr(f"/unix/tmp/test_p2pd_listen_{name}.sock")
+
+    if IS_WINDOWS:
+        # On Windows, use TCP sockets
+        import socket as std_socket
+
+        # Find available ports for control and listen
+        control_sock = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_STREAM)
+        control_sock.bind(("127.0.0.1", 0))
+        control_port = control_sock.getsockname()[1]
+        control_sock.close()
+
+        listen_sock = std_socket.socket(std_socket.AF_INET, std_socket.SOCK_STREAM)
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_port = listen_sock.getsockname()[1]
+        listen_sock.close()
+
+        control_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{control_port}")
+        listen_maddr = Multiaddr(f"/ip4/127.0.0.1/tcp/{listen_port}")
+    else:
+        # On Unix, use Unix domain sockets
+        control_maddr = Multiaddr(f"/unix/tmp/test_p2pd_control_{name}.sock")
+        listen_maddr = Multiaddr(f"/unix/tmp/test_p2pd_listen_{name}.sock")
     try:
         async with _make_p2pd_pair(
             control_maddr=control_maddr,
@@ -120,10 +152,15 @@ async def make_p2pd_pair_unix(enable_control, enable_connmgr, enable_dht, enable
         ) as pair:
             yield pair
     finally:
-        with suppress(FileNotFoundError):
-            os.unlink(control_maddr.value_for_protocol(protocols.P_UNIX))
-        with suppress(FileNotFoundError):
-            os.unlink(listen_maddr.value_for_protocol(protocols.P_UNIX))
+        if IS_WINDOWS:
+            # On Windows, TCP sockets don't need file cleanup
+            pass
+        else:
+            # On Unix, clean up Unix domain socket files
+            with suppress(FileNotFoundError):
+                os.unlink(control_maddr.value_for_protocol(protocols.P_UNIX))
+            with suppress(FileNotFoundError):
+                os.unlink(listen_maddr.value_for_protocol(protocols.P_UNIX))
 
 
 @asynccontextmanager
