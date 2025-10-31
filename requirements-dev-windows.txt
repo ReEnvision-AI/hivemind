@@ -1,0 +1,21 @@
+# Windows-specific development requirements for Hivemind
+
+# Testing framework
+pytest==8.3.5
+pytest-asyncio==0.26.0
+pytest-cov
+pytest-timeout
+coverage
+tqdm
+
+# Development tools
+scikit-learn
+codespell==2.2.2
+psutil
+ruff==0.11.2
+
+# Windows testing alternatives
+pytest-windows>=0.4.0
+pytest-split>=0.8.0
+
+# pytest-forked excluded - not available on Windows
