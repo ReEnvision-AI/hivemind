@@ -40,8 +40,11 @@ def get_process_class():
         Process class suitable for the current platform
     """
     if IS_WINDOWS:
+        # On Windows, use regular Process with spawn context
         return get_multiprocessing_context().Process
     else:
+        # On Unix, use ForkProcess to maintain compatibility with weakref objects
+        # and preserve original behavior. This automatically uses fork semantics.
         return mp.context.ForkProcess
 
 
@@ -136,7 +139,8 @@ def configure_multiprocessing():
         # On Windows, ensure we're using spawn method
         mp.set_start_method('spawn', force=True)
     else:
-        # On Unix, prefer fork for performance and shared memory inheritance
+        # On Unix, force fork method for compatibility with existing code
+        # This is necessary for weakref compatibility and to preserve original behavior
         try:
             mp.set_start_method('fork', force=True)
         except RuntimeError:
@@ -144,5 +148,5 @@ def configure_multiprocessing():
             pass
 
 
-# Module-level configuration
+# Configure multiprocessing for cross-platform compatibility
 configure_multiprocessing()
