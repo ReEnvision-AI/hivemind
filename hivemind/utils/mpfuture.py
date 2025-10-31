@@ -133,6 +133,9 @@ class MPFuture(base.Future, Generic[ResultType]):
         # Initialize shared state to PENDING
         self._set_shared_state(base.PENDING)
 
+        # Additional initialization
+        self.__init_post()
+
         assert self._uid not in MPFuture._active_futures
         MPFuture._active_futures[self._uid] = ref(self)
         self._sender_pipe = MPFuture._global_sender_pipe
@@ -143,8 +146,9 @@ class MPFuture(base.Future, Generic[ResultType]):
             # On Windows, _shared_state_code is a multiprocessing.Value
             self._shared_state_code.value = ALL_STATES.index(state)
         else:
-            # On Unix, _shared_state_code is a torch tensor
-            self._shared_state_code[0] = ALL_STATES.index(state)
+            # On Unix, _shared_state_code is a scalar torch tensor (0-dim)
+            with torch.inference_mode():
+                self._shared_state_code[...] = ALL_STATES.index(state)
 
     def _get_shared_state(self) -> State:
         """Get the shared state value in a cross-platform manner"""
@@ -152,9 +156,11 @@ class MPFuture(base.Future, Generic[ResultType]):
             # On Windows, _shared_state_code is a multiprocessing.Value
             return ALL_STATES[self._shared_state_code.value]
         else:
-            # On Unix, _shared_state_code is a torch tensor
-            return ALL_STATES[int(self._shared_state_code[0].item())]
+            # On Unix, _shared_state_code is a scalar torch tensor (0-dim)
+            return ALL_STATES[int(self._shared_state_code.item())]
 
+    def __init_post(self):
+        """Additional initialization after shared state is set up"""
         try:
             self._loop = asyncio.get_event_loop()
             self._aio_event = asyncio.Event()
